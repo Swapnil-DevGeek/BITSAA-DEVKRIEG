@@ -1,0 +1,12 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+!.env.example
+data/validations.db
+data/validations.db-*
+data/runs/
+*.log
