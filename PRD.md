@@ -1,4 +1,4 @@
-# PRD — Idea Validator (OASIS Engine)
+# PRD — Idea Validator (OASIS-Camel AI Engine)
 **BITSAA Build-a-thon · April 19, 2026**
 
 ---
