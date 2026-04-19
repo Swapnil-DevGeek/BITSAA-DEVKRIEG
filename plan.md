@@ -53,15 +53,23 @@ CREATE INDEX IF NOT EXISTS idx_validations_slug ON validations(slug);
       "name": "Skeptical VC",
       "verdict": "FAIL",
       "score": 4,
+      "steelman_against": "<strongest single argument this idea fails>",
       "insight": "...",
       "objection": "...",
       "recommendation": "..."
     }
   ],
-  "convictionScore": 6.25,
-  "actionItem": "..."
+  "convictionScore": 5.75,
+  "actionItem": "...",
+  "flags": [],
+  "blindSpot": "<panel moderator warning, or null>"
 }
 ```
+
+Possible `flags` values:
+- `"unanimous_optimism"` — all 4 gave PASS (treat with skepticism)
+- `"unanimous_rejection"` — 0 gave PASS
+- `"groupthink_risk"` — all scores within 1 point of each other
 
 ### Result shape — Market
 ```json
@@ -141,9 +149,11 @@ Runs all 4 persona calls in parallel, returns structured result.
 **Response:** `200 OK`
 ```json
 {
-  "personas": [ /* 4 persona result objects */ ],
-  "convictionScore": 6.5,
-  "actionItem": "..."
+  "personas": [ /* 4 persona result objects with steelman_against */ ],
+  "convictionScore": 5.75,
+  "actionItem": "...",
+  "flags": [],
+  "blindSpot": null
 }
 ```
 
@@ -185,7 +195,7 @@ Saves a completed simulation result to Turso (SQLite) and returns the shareable 
   "mode": "boardroom",
   "config": { "personas": [...] },
   "result": { /* full result payload */ },
-  "convictionScore": 6.5
+  "convictionScore": 5.75
 }
 ```
 
@@ -235,12 +245,28 @@ Health check endpoint. Returns `{ "status": "ok" }`.
 ```
 You are {{persona.name}}: {{persona.description}}.
 
+IMPORTANT: You are NOT a coach or mentor. You are a decision-maker
+who has seen hundreds of pitches fail. A score above 7 means you
+would personally bet money on this. Be honest, even if uncomfortable.
+Founders need real feedback, not validation.
+
 A founder is pitching you this idea:
 IDEA: {{idea}}
 TARGET USER: {{targetUser}}
 
+Score calibration — use this strictly:
+  1–3  Fatal flaw at the concept level; can't be fixed without changing the core
+  4–5  Could work, but most attempts here fail
+  6–7  Viable with significant execution risk
+  8–9  Strong — clear market need, execution is the primary risk
+  10   Near-certain winner — almost never give this
+
+Step 1: Write the single strongest argument against this idea succeeding.
+Step 2: Evaluate the idea WITH that argument in mind, then score it.
+
 Respond ONLY with valid JSON. No preamble, no explanation:
 {
+  "steelman_against": "<strongest single argument this idea fails>",
   "verdict": "PASS" | "FAIL" | "CONDITIONAL",
   "score": <integer 1-10>,
   "insight": "<2-3 sentences from your perspective>",
@@ -249,7 +275,28 @@ Respond ONLY with valid JSON. No preamble, no explanation:
 }
 ```
 
-All 4 calls run in `Promise.all()`. Conviction score = arithmetic mean of scores.
+All 4 calls run in `Promise.all()`.
+
+### Conviction Score Formula (server-side, post-parse)
+
+```
+base            = arithmetic mean of persona scores
+failPenalty     = 0.5 × (count of FAIL verdicts)
+convictionScore = base − failPenalty   (floor at 1.0)
+
+flags = []
+if all 4 verdicts === 'PASS'                      → flags.push('unanimous_optimism')
+if 0 verdicts === 'PASS'                          → flags.push('unanimous_rejection')
+if max(scores) − min(scores) <= 1                 → flags.push('groupthink_risk')
+```
+
+### Verdict–Score Consistency (auto-clamp, prevents LLM contradictions)
+
+```
+verdict === 'FAIL'        → clamp score to ≤ 5
+verdict === 'PASS'        → clamp score to ≥ 6
+verdict === 'CONDITIONAL' → clamp score to 4–7
+```
 
 ---
 
@@ -367,10 +414,14 @@ OPENAI_API_KEY=
 
 **T3.2** `app/api/boardroom/route.ts`
 - Parse + validate request body
-- Build 4 prompts from template
+- Build 4 prompts from template (with anti-sycophancy + score anchors + steelman instruction)
 - `Promise.all()` across 4 Claude/OpenAI calls
-- Parse JSON from each response (try/catch per call)
-- Calculate conviction score + pick actionItem
+- Parse JSON from each response (try/catch per call; on parse failure, retry once)
+- **Clamp scores** for verdict-score consistency before any calculation
+- **Calculate conviction score**: `mean(scores) − (0.5 × failCount)`, floored at 1.0
+- **Generate flags**: unanimous_optimism / unanimous_rejection / groupthink_risk
+- **Pick actionItem**: highest-priority objection from FAIL personas, or top recommendation if all PASS
+- **Call meta-validation** (T3.7) with all 4 persona responses → attach `blindSpot`
 - Return full result
 
 **T3.3** `app/boardroom/page.tsx`
@@ -381,15 +432,28 @@ OPENAI_API_KEY=
 **T3.4** `components/boardroom/PersonaCard.tsx`
 - Verdict badge (PASS=green, FAIL=red, CONDITIONAL=yellow)
 - Score out of 10
+- **"Biggest Risk" callout** (red-bordered box): surfaces `steelman_against` prominently — this is the most honest signal
 - Insight text
 - Objection/endorsement highlighted
+- Recommendation in muted text at the bottom
 
 **T3.5** `components/boardroom/ConvictionScore.tsx`
-- Animated circular gauge (0-10)
+- Animated circular gauge (0-10) showing penalty-adjusted conviction score
 - Color scale: 0-4 red, 5-7 yellow, 8-10 green
+- **Score distribution bar** below the gauge: shows each persona's individual score as mini bars so the user sees spread, not just the mean (a 5.8 from [3,8,4,8] looks very different from [5,6,6,6])
+- **Flag banners**: if `flags` contains `unanimous_optimism` → amber warning "All panelists agreed — consider seeking harsher critics"; `groupthink_risk` → "Scores are suspiciously uniform"
+- **Blind spot alert** (if `blindSpot` is non-null): collapsible panel below the gauge labeled "Panel Blind Spot — what everyone missed"
 
 **T3.6** `components/boardroom/ActionItem.tsx`
 - Prominent callout box: "#1 Thing To Fix Before You Build"
+
+**T3.7** Meta-validation call (`lib/boardroom-engine.ts`)
+- Runs after all 4 persona responses are collected
+- Single LLM call (Claude Sonnet / GPT-4o) acting as "panel moderator"
+- Prompt: given the 4 evaluations, identify any major market risk or obvious failure mode ALL reviewers missed; if the panel seems unreasonably positive, flag it explicitly
+- Response: `{ "blindSpot": "<warning string or null>", "overallAssessment": "calibrated" | "overly_optimistic" | "overly_harsh" }`
+- `overallAssessment === 'overly_optimistic'` → reduce convictionScore by 1 additional point and surface a warning
+- This call runs in parallel with the save step, not blocking the results render
 
 ---
 
@@ -506,8 +570,13 @@ OPENAI_API_KEY=
 
 ## Verification / Testing Checklist
 
-- [ ] Boardroom: submit form → 4 persona cards appear with valid JSON data
-- [ ] Boardroom: conviction score correctly averages persona scores
+- [ ] Boardroom: submit form → 4 persona cards appear with valid JSON data including `steelman_against`
+- [ ] Boardroom: FAIL verdict with score > 5 gets auto-clamped to 5 (test with a clearly bad idea)
+- [ ] Boardroom: conviction score uses penalty formula, not plain mean
+- [ ] Boardroom: `unanimous_optimism` flag appears when all 4 give PASS
+- [ ] Boardroom: `groupthink_risk` flag appears when all scores within 1 point
+- [ ] Boardroom: `blindSpot` panel appears when meta-validation flags an issue
+- [ ] Boardroom: score distribution bar shows individual scores, not just aggregate
 - [ ] Boardroom: result auto-saves and `/result/[slug]` loads the saved data
 - [ ] Market: SSE connection opens, events stream in real-time
 - [ ] Market: vote counters animate when `lurker_vote` events arrive
@@ -524,7 +593,8 @@ OPENAI_API_KEY=
 
 | Call | Model | Count | ~Tokens | ~Cost |
 |---|---|---|---|---|
-| Boardroom personas | Claude Sonnet | 4 parallel | 800/call | ~$0.02 |
+| Boardroom personas | Claude Sonnet | 4 parallel | 900/call | ~$0.022 |
+| Boardroom meta-validation | Claude Sonnet | 1 | 1200 | ~$0.004 |
 | Market vocal agents | Claude Haiku | `numVocal×2` turns (e.g. 10 for numVocal=5) | 350/call | ~$0.004 |
 | Market traction summary | Claude Sonnet | 1 | 600 | ~$0.002 |
-| **Total per session** | | | | **~$0.03** |
+| **Total per session** | | | | **~$0.032** |
