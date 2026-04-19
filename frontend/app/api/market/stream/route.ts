@@ -1,6 +1,4 @@
-import { NextRequest } from "next/server";
-
-const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:8000";
+import { MOCK_THREAD } from "@/lib/mock-data";
 
 function sseEvent(type: string, data: unknown): Uint8Array {
   const payload = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -11,129 +9,87 @@ function wait(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-interface BackendReply {
-  id: string;
-  agent: string;
-  comment: string;
-  likes: number;
-  turn: number;
-}
-
-interface BackendComment {
-  id: string;
-  agent: string;
-  comment: string;
-  likes: number;
-  turn: number;
-  replies: BackendReply[];
-}
-
-export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
-  const idea = searchParams.get("idea") ?? "";
-  const targetUser = searchParams.get("targetUser") ?? "";
-  const subreddit = searchParams.get("subreddit") ?? "r/startups";
-  const numVocal = Number(searchParams.get("numVocal") ?? "5");
+export async function GET() {
+  const turn1Comments = MOCK_THREAD.filter((c) => c.turn === 1);
+  const turn2Comments = MOCK_THREAD.filter((c) => c.turn === 2);
 
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const res = await fetch(`${BACKEND_URL}/simulate/market`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ idea, targetUser, subreddit, numVocal, turns: 2 }),
-        });
-
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({}));
-          controller.enqueue(
-            sseEvent("error", { message: err.message ?? "Simulation failed" })
-          );
-          controller.close();
-          return;
-        }
-
-        const data = await res.json();
-        const thread: BackendComment[] = data.thread ?? [];
-
-        // Stream top-level comments
-        for (const comment of thread) {
-          await wait(800);
+        // ── Turn 1: initial comments ──────────────────────────────────────────
+        for (const comment of turn1Comments) {
+          await wait(1400);
           controller.enqueue(
             sseEvent("agent_comment", {
               id: comment.id,
               agent: comment.agent,
               comment: comment.comment,
-              turn: comment.turn,
+              turn: 1,
             })
           );
 
-          if (comment.likes > 0) {
-            await wait(400);
+          // Lurker votes arrive shortly after each comment
+          await wait(600);
+          const voteCount = Math.floor(Math.random() * 3) + 2;
+          for (let i = 0; i < voteCount; i++) {
+            await wait(300);
             controller.enqueue(
-              sseEvent("lurker_vote", { commentId: comment.id, delta: comment.likes })
-            );
-          }
-        }
-
-        await wait(1500);
-
-        // Stream replies
-        for (const comment of thread) {
-          for (const reply of comment.replies ?? []) {
-            await wait(700);
-            controller.enqueue(
-              sseEvent("agent_reply", {
-                id: reply.id,
-                agent: reply.agent,
-                comment: reply.comment,
-                parentId: comment.id,
-                turn: reply.turn,
+              sseEvent("lurker_vote", {
+                commentId: comment.id,
+                delta: Math.floor(Math.random() * 10) + 2,
               })
             );
-
-            if (reply.likes > 0) {
-              await wait(300);
-              controller.enqueue(
-                sseEvent("lurker_vote", { commentId: reply.id, delta: reply.likes })
-              );
-            }
           }
         }
 
-        await wait(1000);
+        // Brief pause between turns
+        await wait(2000);
 
-        // Normalize thread to frontend shape (likes → upvotes)
-        const normalizedThread = thread.map((c) => ({
-          id: c.id,
-          agent: c.agent,
-          type: "vocal" as const,
-          comment: c.comment,
-          upvotes: c.likes,
-          turn: c.turn,
-          replies: (c.replies ?? []).map((r) => ({
-            id: r.id,
-            agent: r.agent,
-            comment: r.comment,
-            upvotes: r.likes,
-            turn: r.turn,
-          })),
-        }));
+        // ── Turn 2: replies ───────────────────────────────────────────────────
+        for (let i = 0; i < turn2Comments.length; i++) {
+          const comment = turn2Comments[i];
+          await wait(1600);
 
+          // Turn 2 comments are replies to Turn 1 comments
+          const parentId = turn1Comments[i % turn1Comments.length]?.id ?? turn1Comments[0].id;
+          controller.enqueue(
+            sseEvent("agent_reply", {
+              id: `${comment.id}_r${i}`,
+              agent: comment.agent,
+              comment: comment.comment,
+              parentId,
+              turn: 2,
+            })
+          );
+
+          // More lurker votes on replies
+          await wait(500);
+          const voteCount = Math.floor(Math.random() * 2) + 1;
+          for (let j = 0; j < voteCount; j++) {
+            await wait(400);
+            controller.enqueue(
+              sseEvent("lurker_vote", {
+                commentId: parentId,
+                delta: Math.floor(Math.random() * 6) + 1,
+              })
+            );
+          }
+        }
+
+        // ── Final aggregation ─────────────────────────────────────────────────
+        await wait(1500);
         controller.enqueue(
           sseEvent("simulation_complete", {
-            slug: data.slug,
-            tractionScore: data.tractionScore,
-            summary: data.summary,
-            thread: normalizedThread,
+            slug: "",
+            tractionScore: 7.2,
+            summary:
+              "Strong signal from early adopters and power users, tempered by legitimate concerns around scraping legality and scraper maintenance burden. The Slack-native distribution angle is genuinely differentiated from incumbent players. Biggest risk is legal exposure from ToS violations — recommend scoping MVP to public pricing pages only and getting legal counsel before launch.",
+            thread: MOCK_THREAD,
           })
         );
 
         controller.close();
       } catch {
-        controller.enqueue(
-          sseEvent("error", { message: "Simulation failed unexpectedly" })
-        );
         controller.close();
       }
     },
