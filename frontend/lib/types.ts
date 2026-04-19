@@ -61,7 +61,7 @@ export type MarketSSEEvent =
   | { type: "agent_comment"; id: string; agent: string; comment: string; turn: number }
   | { type: "lurker_vote"; commentId: string; delta: number }
   | { type: "agent_reply"; id: string; agent: string; comment: string; parentId: string; turn: number }
-  | { type: "simulation_complete"; tractionScore: number; summary: string; thread: MarketComment[] }
+  | { type: "simulation_complete"; slug: string; tractionScore: number; summary: string; thread: MarketComment[] }
   | { type: "error"; message: string };
 
 // ── Saved validation (DB row shape returned by /api/result/[slug]) ────────────

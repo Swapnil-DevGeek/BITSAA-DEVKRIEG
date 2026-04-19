@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { ArrowLeft, Share2, Check, Hash } from "lucide-react";
 import { useIdeaStore } from "@/lib/store";
-import { buildMarketStreamUrl, saveResult } from "@/lib/api";
+import { buildMarketStreamUrl } from "@/lib/api";
 import type { MarketComment, MarketSSEEvent } from "@/lib/types";
 import { CommentThread } from "@/components/market/CommentThread";
 import { AggregationOverlay } from "@/components/market/AggregationOverlay";
@@ -71,22 +71,17 @@ export default function MarketPage() {
       scrollFeed();
     });
 
-    es.addEventListener("simulation_complete", async (e) => {
+    es.addEventListener("simulation_complete", (e) => {
       const data = JSON.parse(e.data) as Extract<MarketSSEEvent, { type: "simulation_complete" }>;
       setStatus("done");
       setOverlayData({ score: data.tractionScore, summary: data.summary });
       setShowOverlay(true);
       es.close();
 
-      try {
-        const saved = await saveResult({
-          idea, targetUser, mode: "market",
-          config: { subreddit },
-          result: { subreddit, thread: data.thread, tractionScore: data.tractionScore, summary: data.summary },
-          convictionScore: data.tractionScore,
-        });
-        setShareUrl(saved.url);
-      } catch { /* non-blocking */ }
+      if (data.slug) {
+        const appUrl = process.env.NEXT_PUBLIC_APP_URL ?? window.location.origin;
+        setShareUrl(`${appUrl}/result/${data.slug}`);
+      }
     });
 
     es.addEventListener("error", (e) => {
